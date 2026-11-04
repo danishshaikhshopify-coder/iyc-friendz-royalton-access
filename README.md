@@ -47,27 +47,38 @@ npm run db:migrate           # creates/updates dev.db
 npm run dev
 ```
 
-`.env.example` leaves `SHOPIFY_ADMIN_API_ACCESS_TOKEN`,
-`SHOPIFY_WEBHOOK_SIGNING_SECRET`, `SHOPIFY_APP_PROXY_SIGNING_SECRET`, and
-`ACCESS_TOKEN_SIGNING_SECRET` blank on purpose (they're real secrets, never
-committed) — `src/lib/config.ts` treats all four as required, so the app
-won't start with them empty. For local development only (never for a real
-deployment), set them to any non-empty placeholder string, e.g.:
+`.env.example` leaves `SHOPIFY_WEBHOOK_SIGNING_SECRET`,
+`SHOPIFY_APP_PROXY_SIGNING_SECRET`, `ACCESS_TOKEN_SIGNING_SECRET`,
+`SHOPIFY_API_KEY`, `SHOPIFY_API_SECRET`, and `TOKEN_ENCRYPTION_KEY` blank on
+purpose (they're real secrets, never committed) — `src/lib/config.ts`
+treats all six as required, so the app won't start with them empty. For
+local development only (never for a real deployment), set them to any
+non-empty placeholder string (`TOKEN_ENCRYPTION_KEY` must still decode as
+32 base64 bytes — use a real `openssl rand -base64 32` value even
+locally), e.g.:
 
 ```bash
-SHOPIFY_ADMIN_API_ACCESS_TOKEN=local-dev-placeholder
 SHOPIFY_WEBHOOK_SIGNING_SECRET=local-dev-placeholder
 SHOPIFY_APP_PROXY_SIGNING_SECRET=local-dev-placeholder
 ACCESS_TOKEN_SIGNING_SECRET=local-dev-placeholder
+SHOPIFY_API_KEY=local-dev-placeholder
+SHOPIFY_API_SECRET=local-dev-placeholder
+TOKEN_ENCRYPTION_KEY=$(openssl rand -base64 32)
 ```
 
 (`tests/setup.ts` does exactly this for the test suite — same pattern.)
-With those four filled in, `EMAIL_PROVIDER=none` (the default) and no
-`ROYALTON_BOOKING_URL` set, the service runs fully locally: webhook
-handlers log what they would do, and the access page renders its "almost
-ready" state. `npm run db:migrate` reads `.env.local` automatically (via
-Node's `--env-file-if-exists`, Node 20.12+/21.7+ — already covered by this
-project's `engines` requirement).
+The Admin API access token is **no longer a pasted static value** — this
+app now obtains it via Shopify OAuth (Authorization Code Grant, offline
+access; see `src/lib/shopify-oauth.ts`) and stores it encrypted in the
+`shop_installations` table, since this app runs on a merchant-owned store
+outside this org's Partner Dev Dashboard (per Shopify's standalone-app
+guidance). Locally, the eligibility-checking routes simply fail closed
+(`AdminApiError`/502) until `/api/auth?shop=...` has been completed against
+a real, publicly-reachable (tunneled) deployment — there's no local mock
+for the OAuth dance itself; unit/route tests mock the Admin API client
+instead (see Testing below). `npm run db:migrate` reads `.env.local`
+automatically (via Node's `--env-file-if-exists`, Node 20.12+/21.7+ —
+already covered by this project's `engines` requirement).
 
 ## Testing
 

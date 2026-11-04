@@ -31,7 +31,6 @@ export const config = {
       "inyourcitycorp.com"
     ),
     adminApiVersion: optional("SHOPIFY_ADMIN_API_VERSION", "2026-01"),
-    adminApiAccessToken: required("SHOPIFY_ADMIN_API_ACCESS_TOKEN"),
     webhookSigningSecret: required("SHOPIFY_WEBHOOK_SIGNING_SECRET"),
     appProxySigningSecret: required("SHOPIFY_APP_PROXY_SIGNING_SECRET"),
     eventPassProductHandle: optional(
@@ -57,6 +56,23 @@ export const config = {
   tokens: {
     // HMAC key used to derive/verify tokens. 32+ random bytes, base64 or hex.
     signingSecret: required("ACCESS_TOKEN_SIGNING_SECRET"),
+  },
+
+  // Shopify OAuth (Authorization Code Grant, offline access). Replaces the
+  // old static SHOPIFY_ADMIN_API_ACCESS_TOKEN — the Admin API token is now
+  // obtained via OAuth and stored (encrypted) in shop_installations. Both
+  // values below come from the app's API credentials page and are the
+  // same "Client ID" / "Client secret" pair used to sign the OAuth
+  // authorize URL, verify the callback HMAC, and exchange the code.
+  oauth: {
+    apiKey: required("SHOPIFY_API_KEY"),
+    apiSecret: required("SHOPIFY_API_SECRET"),
+  },
+
+  security: {
+    // AES-256-GCM key (32 bytes, base64) for encrypting the stored OAuth
+    // access/refresh tokens at rest. Generate with: openssl rand -base64 32
+    tokenEncryptionKey: required("TOKEN_ENCRYPTION_KEY"),
   },
 
   db: {

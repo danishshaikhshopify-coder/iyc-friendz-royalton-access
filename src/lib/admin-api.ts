@@ -10,6 +10,7 @@
  */
 
 import { config } from "@/lib/config";
+import { getValidAccessToken } from "@/lib/shopify-oauth";
 
 export interface OrderLineItemData {
   productHandle: string | null;
@@ -77,13 +78,23 @@ export const shopifyAdminApiClient: AdminApiClient = {
   async fetchOrderEligibilityData(orderGid: string): Promise<OrderEligibilityData> {
     const url = `https://${config.shopify.shopDomain}/admin/api/${config.shopify.adminApiVersion}/graphql.json`;
 
+    let accessToken: string;
+    try {
+      accessToken = await getValidAccessToken(config.shopify.shopDomain);
+    } catch (err) {
+      // No installation, revoked, or an expired token with no refresh
+      // token available — treat identically to any other Admin API
+      // failure: fail closed, never an implicit pass.
+      throw new AdminApiError("Could not obtain a valid Shopify access token", err);
+    }
+
     let response: Response;
     try {
       response = await fetch(url, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "X-Shopify-Access-Token": config.shopify.adminApiAccessToken,
+          "X-Shopify-Access-Token": accessToken,
         },
         body: JSON.stringify({ query: ORDER_QUERY, variables: { id: orderGid } }),
       });

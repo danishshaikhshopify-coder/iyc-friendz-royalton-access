@@ -9,3 +9,6 @@ dev.db-*
 .env*.local
 tsconfig.tsbuildinfo
 coverage/
+
+.vercel
+.env*
