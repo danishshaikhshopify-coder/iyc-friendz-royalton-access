@@ -5,8 +5,11 @@
  * to mint a token and send an email, never as the final access decision
  * (see src/lib/eligibility.ts and the App Proxy route).
  *
- * Required scope: read_orders only. No write scope is used anywhere in
- * this service.
+ * Required scopes: read_orders, read_products (the latter is needed to
+ * resolve `lineItems.product.handle` below — Shopify enforces that as a
+ * separate field-level grant even though it's reached via an Order query;
+ * see src/lib/shopify-oauth.ts). No write scope is used anywhere in this
+ * service.
  */
 
 import { config } from "@/lib/config";

@@ -60,7 +60,7 @@ describe("buildAuthorizeUrl", () => {
   it("includes client_id, scope, redirect_uri, and state", () => {
     const url = buildAuthorizeUrl("test-shop.myshopify.com", "the-state-value", "https://app.example.com/api/auth/callback");
     expect(url).toMatch(/^https:\/\/test-shop\.myshopify\.com\/admin\/oauth\/authorize\?/);
-    expect(url).toContain("scope=read_orders");
+    expect(url).toContain("scope=read_orders%2Cread_products");
     expect(url).toContain("state=the-state-value");
     expect(url).toContain(encodeURIComponent("https://app.example.com/api/auth/callback"));
   });

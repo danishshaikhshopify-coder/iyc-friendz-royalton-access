@@ -14,7 +14,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { config } from "@/lib/config";
 import { verifyShopifyWebhookHmac } from "@/lib/shopify-hmac";
-import { recordWebhookEventOnce } from "@/lib/webhook-events";
+import {
+  claimWebhookEvent,
+  markWebhookEventCompleted,
+  markWebhookEventFailed,
+} from "@/lib/webhook-events";
 import { markShopUninstalled } from "@/lib/shop-installations";
 
 export const runtime = "nodejs";
@@ -43,14 +47,31 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "missing_webhook_id" }, { status: 400 });
   }
 
-  const isNewDelivery = await recordWebhookEventOnce(shopDomain, webhookId, topic);
-  if (!isNewDelivery) {
+  const claim = await claimWebhookEvent(shopDomain, webhookId, topic);
+  if (claim === "duplicate") {
     // eslint-disable-next-line no-console
     console.log("[app/uninstalled] duplicate delivery skipped", { webhookId });
     return NextResponse.json({ ok: true, duplicate: true }, { status: 200 });
   }
+  if (claim === "in_progress") {
+    // eslint-disable-next-line no-console
+    console.log("[app/uninstalled] delivery already in progress, skipped", { webhookId });
+    return NextResponse.json({ ok: true, inProgress: true }, { status: 200 });
+  }
 
-  await markShopUninstalled(shopDomain);
+  try {
+    await markShopUninstalled(shopDomain);
+  } catch (err) {
+    await markWebhookEventFailed(shopDomain, webhookId);
+    // eslint-disable-next-line no-console
+    console.error("[app/uninstalled] handler error", {
+      webhookId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return NextResponse.json({ error: "processing_failed" }, { status: 500 });
+  }
+
+  await markWebhookEventCompleted(shopDomain, webhookId);
   // eslint-disable-next-line no-console
   console.log("[app/uninstalled] shop installation revoked", { shop: shopDomain });
 

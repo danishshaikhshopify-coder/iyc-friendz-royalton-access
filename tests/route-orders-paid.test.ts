@@ -143,6 +143,64 @@ describe("orders/paid webhook route", () => {
     expect(shopifyAdminApiClient.fetchOrderEligibilityData).toHaveBeenCalledTimes(1);
   });
 
+  it("REGRESSION: a failed delivery (handler throws) is retried and succeeds when Shopify redelivers the same webhook id", async () => {
+    // Reproduces the Task 19 live-QA incident: the Admin API call failed
+    // (there, a missing read_products scope) on the first delivery, and
+    // Shopify's automatic retry reused the same X-Shopify-Webhook-Id. The
+    // retry must be reprocessed, not silently skipped as a duplicate of a
+    // delivery that never actually succeeded.
+    const orderId = uniqueId();
+    const webhookId = `wh-${orderId}`;
+    const payload = { id: Number(orderId), email: "customer@example.com" };
+
+    vi.mocked(shopifyAdminApiClient.fetchOrderEligibilityData).mockRejectedValueOnce(
+      new Error("Shopify Admin API GraphQL errors: Access denied for product field. Required access: `read_products` access scope.")
+    );
+    const first = await POST(buildWebhookRequest(payload, { webhookId }));
+    expect(first.status).toBe(500);
+
+    const grantAfterFailure = await findAccessGrantByOrder(SHOP, orderId);
+    expect(grantAfterFailure).toBeNull();
+
+    vi.mocked(shopifyAdminApiClient.fetchOrderEligibilityData).mockResolvedValueOnce(
+      eligibleOrderData(orderId)
+    );
+    const retry = await POST(buildWebhookRequest(payload, { webhookId }));
+    expect(retry.status).toBe(200);
+    expect(await retry.json()).not.toMatchObject({ duplicate: true });
+
+    const grantAfterRetry = await findAccessGrantByOrder(SHOP, orderId);
+    expect(grantAfterRetry).not.toBeNull();
+    expect(grantAfterRetry?.emailSent).toBe(true);
+
+    // The Admin API was actually called on both attempts — the retry was
+    // genuinely reprocessed, not skipped.
+    expect(shopifyAdminApiClient.fetchOrderEligibilityData).toHaveBeenCalledTimes(2);
+  });
+
+  it("REGRESSION: a duplicate delivery of an already-SUCCEEDED webhook is skipped without calling the Admin API again", async () => {
+    const orderId = uniqueId();
+    const webhookId = `wh-${orderId}`;
+    const payload = { id: Number(orderId), email: "customer@example.com" };
+
+    vi.mocked(shopifyAdminApiClient.fetchOrderEligibilityData).mockResolvedValue(
+      eligibleOrderData(orderId)
+    );
+    const first = await POST(buildWebhookRequest(payload, { webhookId }));
+    expect(first.status).toBe(200);
+    const grantAfterFirst = await findAccessGrantByOrder(SHOP, orderId);
+    expect(grantAfterFirst).not.toBeNull();
+
+    const duplicate = await POST(buildWebhookRequest(payload, { webhookId }));
+    expect(duplicate.status).toBe(200);
+    expect(await duplicate.json()).toMatchObject({ duplicate: true });
+
+    const grantAfterDuplicate = await findAccessGrantByOrder(SHOP, orderId);
+    // Same grant — not re-minted.
+    expect(grantAfterDuplicate?.tokenHash).toEqual(grantAfterFirst?.tokenHash);
+    expect(shopifyAdminApiClient.fetchOrderEligibilityData).toHaveBeenCalledTimes(1);
+  });
+
   it("does not mint a second token/email if a grant already exists for the order (idempotent even with a different webhook id)", async () => {
     const orderId = uniqueId();
     vi.mocked(shopifyAdminApiClient.fetchOrderEligibilityData).mockResolvedValue(

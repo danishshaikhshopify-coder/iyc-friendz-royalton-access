@@ -34,7 +34,7 @@ describe("OAuth initiation — GET /api/auth", () => {
     const location = res.headers.get("location");
     expect(location).toContain(`https://${SHOP}/admin/oauth/authorize`);
     expect(location).toContain("client_id=test-oauth-client-id");
-    expect(location).toContain("scope=read_orders");
+    expect(location).toContain("scope=read_orders%2Cread_products");
     expect(location).toContain(encodeURIComponent("https://app.example.com/api/auth/callback"));
 
     const setCookie = res.headers.get("set-cookie");

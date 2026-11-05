@@ -24,7 +24,14 @@ import {
   updateShopTokens,
 } from "@/lib/shop-installations";
 
-const OAUTH_SCOPES = "read_orders";
+// read_orders: core order data (financial status, cancellation, line item
+// quantities). read_products: required separately — Shopify's GraphQL
+// Admin API enforces field-level access on the nested `lineItems.product`
+// object even when queried through an Order the app can already read, so
+// resolving `product.handle` (how eligibility is matched to the configured
+// event-pass product; see src/lib/admin-api.ts and src/lib/eligibility.ts)
+// 403s without it. No other scope is used anywhere in this service.
+const OAUTH_SCOPES = "read_orders,read_products";
 const SHOP_DOMAIN_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9-]*\.myshopify\.com$/;
 
 export class OAuthError extends Error {
