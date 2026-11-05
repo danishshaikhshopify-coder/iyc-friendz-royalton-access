@@ -1,124 +1,30 @@
 /**
- * Registers this app's required webhook topics on the configured shop,
- * via the Admin GraphQL API, using the stored OAuth offline token.
+ * CLI wrapper around registerWebhooks() (src/lib/webhook-registration.ts)
+ * — registers this app's required webhook topics on the configured shop.
  *
- * Idempotent: for each topic, it first queries existing subscriptions
- * and skips creation if one already points at the correct callback URL
- * — safe to re-run any number of times, never creates duplicates.
- *
- * NOT run by this session. Per Task 17: webhooks must not be registered
- * until a successful production deployment exists and OAuth
- * authorization has completed for the shop (there must be a row in
- * shop_installations to obtain a token from).
+ * Idempotent — safe to re-run any number of times, never creates
+ * duplicates.
  *
  * Usage (after deploy + OAuth, run by the owner or CI):
- *   APP_BASE_URL=https://iyc-friendz-royalton-access.vercel.app \
- *     npx tsx scripts/register-webhooks.ts
+ *   npm run register-webhooks
+ * (defaults APP_BASE_URL to the production URL below; override it by
+ * setting APP_BASE_URL yourself, e.g. against a preview deployment)
  */
-import { config } from "@/lib/config";
-import { getValidAccessToken } from "@/lib/shopify-oauth";
+import { registerWebhooks } from "@/lib/webhook-registration";
 
-const REQUIRED_TOPICS: Array<{ topic: string; path: string }> = [
-  { topic: "ORDERS_PAID", path: "/api/webhooks/orders-paid" },
-  { topic: "ORDERS_CANCELLED", path: "/api/webhooks/orders-cancelled" },
-  { topic: "REFUNDS_CREATE", path: "/api/webhooks/refunds-create" },
-  { topic: "APP_UNINSTALLED", path: "/api/webhooks/app-uninstalled" },
-];
-
-interface ExistingSubscription {
-  id: string;
-  topic: string;
-  endpoint: { __typename: string; callbackUrl?: string };
-}
-
-async function adminGraphql<T>(accessToken: string, query: string, variables: Record<string, unknown>): Promise<T> {
-  const url = `https://${config.shopify.shopDomain}/admin/api/${config.shopify.adminApiVersion}/graphql.json`;
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Shopify-Access-Token": accessToken,
-    },
-    body: JSON.stringify({ query, variables }),
-  });
-  if (!response.ok) {
-    throw new Error(`Admin API returned HTTP ${response.status}`);
-  }
-  const json = await response.json();
-  if (json.errors?.length) {
-    throw new Error(`Admin API GraphQL errors: ${json.errors.map((e: { message: string }) => e.message).join("; ")}`);
-  }
-  return json.data as T;
-}
-
-const LIST_QUERY = `
-  query ExistingWebhooks {
-    webhookSubscriptions(first: 50) {
-      edges {
-        node {
-          id
-          topic
-          endpoint {
-            __typename
-            ... on WebhookHttpEndpoint { callbackUrl }
-          }
-        }
-      }
-    }
-  }
-`;
-
-const CREATE_MUTATION = `
-  mutation CreateWebhook($topic: WebhookSubscriptionTopic!, $callbackUrl: URL!) {
-    webhookSubscriptionCreate(
-      topic: $topic
-      webhookSubscription: { callbackUrl: $callbackUrl, format: JSON }
-    ) {
-      webhookSubscription { id topic }
-      userErrors { field message }
-    }
-  }
-`;
+const DEFAULT_APP_BASE_URL = "https://iyc-friendz-royalton-access.vercel.app";
 
 async function main() {
-  const baseUrl = process.env.APP_BASE_URL;
-  if (!baseUrl) {
-    throw new Error("Set APP_BASE_URL to the deployed app's base URL (e.g. https://iyc-friendz-royalton-access.vercel.app)");
-  }
+  const baseUrl = process.env.APP_BASE_URL || DEFAULT_APP_BASE_URL;
+  const results = await registerWebhooks(baseUrl);
 
-  const accessToken = await getValidAccessToken(config.shopify.shopDomain);
-
-  const { webhookSubscriptions } = await adminGraphql<{
-    webhookSubscriptions: { edges: Array<{ node: ExistingSubscription }> };
-  }>(accessToken, LIST_QUERY, {});
-  const existing = webhookSubscriptions.edges.map((e) => e.node);
-
-  for (const { topic, path } of REQUIRED_TOPICS) {
-    const callbackUrl = `${baseUrl}${path}`;
-    const alreadyRegistered = existing.some(
-      (sub) => sub.topic === topic && sub.endpoint.callbackUrl === callbackUrl
-    );
-    if (alreadyRegistered) {
-      console.log(`[register-webhooks] ${topic} already points at ${callbackUrl} — skipping`);
-      continue;
+  for (const r of results) {
+    if (r.status === "already_registered") {
+      console.log(`[register-webhooks] ${r.topic} already points at ${r.callbackUrl} — skipping`);
+    } else {
+      console.log(`[register-webhooks] created ${r.topic} -> ${r.callbackUrl} (id ${r.id})`);
     }
-
-    const result = await adminGraphql<{
-      webhookSubscriptionCreate: {
-        webhookSubscription: { id: string; topic: string } | null;
-        userErrors: Array<{ field: string[]; message: string }>;
-      };
-    }>(accessToken, CREATE_MUTATION, { topic, callbackUrl });
-
-    const { webhookSubscription, userErrors } = result.webhookSubscriptionCreate;
-    if (userErrors.length > 0) {
-      throw new Error(
-        `Failed to register ${topic}: ${userErrors.map((e) => e.message).join("; ")}`
-      );
-    }
-    console.log(`[register-webhooks] created ${topic} -> ${callbackUrl} (id ${webhookSubscription?.id})`);
   }
-
   console.log("[register-webhooks] done.");
 }
 

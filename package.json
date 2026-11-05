@@ -11,7 +11,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "db:migrate": "tsx --env-file-if-exists=.env.local scripts/migrate.ts"
+    "db:migrate": "tsx --env-file-if-exists=.env.local scripts/migrate.ts",
+    "register-webhooks": "vercel env run -e production --scope klyro5 -- node --import tsx scripts/register-webhooks.ts"
   },
   "dependencies": {
     "@libsql/client": "^0.14.0",
