@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { NextRequest } from "next/server";
 import { config } from "@/lib/config";
 import { handleShopifyOrderWebhook } from "@/lib/webhook-handler";
@@ -10,6 +11,7 @@ import {
   createAccessGrant,
   findAccessGrantByOrder,
   markAccessGrantEmailSent,
+  markAccessGrantEmailFailed,
 } from "@/lib/access-grants";
 import { generateAccessToken, hashToken } from "@/lib/token";
 import { buildAccessPageUrl } from "@/lib/access-url";
@@ -72,10 +74,17 @@ export async function POST(request: NextRequest) {
     }
 
     const accessPageUrl = buildAccessPageUrl(rawToken);
-    const result = await sendAccessReadyEmail(to, {
-      accessPageUrl,
-      orderName: payload.name ?? orderIdKey,
-    });
+    // Lets the provider dedupe a retried send of this exact token server
+    // side (see src/lib/email.ts's Resend adapter) — safe even if a
+    // previous attempt's outcome was a timeout, not a confirmed failure.
+    const idempotencyKey = createHash("sha256")
+      .update(`${ctx.shopDomain}:${orderIdKey}:${tokenHash}`)
+      .digest("hex");
+    const result = await sendAccessReadyEmail(
+      to,
+      { accessPageUrl, orderName: payload.name ?? orderIdKey },
+      idempotencyKey
+    );
 
     if (result.success) {
       await markAccessGrantEmailSent(ctx.shopDomain, orderIdKey);
@@ -85,6 +94,11 @@ export async function POST(request: NextRequest) {
         orderId: orderIdKey,
         error: result.error,
       });
+      await markAccessGrantEmailFailed(
+        ctx.shopDomain,
+        orderIdKey,
+        result.error ?? "unknown error"
+      );
     }
   });
 }

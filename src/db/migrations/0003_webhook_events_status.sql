@@ -26,9 +26,19 @@
 -- specific row known to have actually failed under the old code, such as
 -- the one tied to the Task 19 QA incident, is corrected separately via an
 -- explicit, audited one-row UPDATE — not by changing this default.)
+--
+-- updated_at's default must be a constant, not an expression: SQLite's
+-- `ALTER TABLE ... ADD COLUMN` only accepts a non-constant default
+-- (CURRENT_TIMESTAMP or an expression) when the column is nullable, and
+-- this one is NOT NULL — Turso/libSQL rejects the `strftime(...)` form
+-- below with a schema error. This was caught when applying this migration
+-- to production, where it was run with the literal epoch constant used
+-- here instead. Every row's `updated_at` gets overwritten by the webhook
+-- state machine on its first real claim/complete/fail anyway, so the
+-- placeholder default is never actually read as a meaningful timestamp.
 
 ALTER TABLE webhook_events ADD COLUMN status TEXT NOT NULL DEFAULT 'completed';
-ALTER TABLE webhook_events ADD COLUMN updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+ALTER TABLE webhook_events ADD COLUMN updated_at TEXT NOT NULL DEFAULT '1970-01-01T00:00:00.000Z';
 
 CREATE INDEX IF NOT EXISTS idx_webhook_events_status
   ON webhook_events (status);

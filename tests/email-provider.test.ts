@@ -39,8 +39,14 @@ describe("getEmailSender provider selection", () => {
     await expect(sendWithProvider("sendgrid")).rejects.toThrow(/not implemented/i);
   });
 
-  it("still succeeds (log-only) for the explicit 'none' provider", async () => {
+  it("REGRESSION: never reports success for the explicit 'none' provider — it's a no-op, not a delivery", async () => {
     const result = await sendWithProvider("none");
-    expect(result.success).toBe(true);
+    expect(result.success).toBe(false);
+  });
+
+  it("'resend' is implemented (does not throw) but fails gracefully with a clear error when RESEND_API_KEY is missing", async () => {
+    const result = await sendWithProvider("resend");
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/RESEND_API_KEY/);
   });
 });

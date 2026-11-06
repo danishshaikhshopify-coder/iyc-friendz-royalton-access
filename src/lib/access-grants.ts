@@ -11,6 +11,8 @@
 import type { Row } from "@libsql/client";
 import { getDbClient } from "@/lib/db";
 
+export type EmailDeliveryStatus = "not_sent" | "accepted" | "failed";
+
 export interface AccessGrant {
   id: number;
   shopDomain: string;
@@ -21,6 +23,9 @@ export interface AccessGrant {
   revokedAt: string | null;
   emailSent: boolean;
   emailSentAt: string | null;
+  emailStatus: EmailDeliveryStatus;
+  emailAttempts: number;
+  emailLastError: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -36,6 +41,9 @@ function rowToGrant(row: Row): AccessGrant {
     revokedAt: row.revoked_at ? String(row.revoked_at) : null,
     emailSent: Number(row.email_sent) === 1,
     emailSentAt: row.email_sent_at ? String(row.email_sent_at) : null,
+    emailStatus: String(row.email_status) as EmailDeliveryStatus,
+    emailAttempts: Number(row.email_attempts),
+    emailLastError: row.email_last_error ? String(row.email_last_error) : null,
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
   };
@@ -113,6 +121,7 @@ export async function revokeAccessGrantForOrder(
   });
 }
 
+/** Call only after the email provider has genuinely accepted the send. */
 export async function markAccessGrantEmailSent(
   shopDomain: string,
   orderId: string
@@ -121,8 +130,62 @@ export async function markAccessGrantEmailSent(
   const now = new Date().toISOString();
   await db.execute({
     sql: `UPDATE access_grants
-          SET email_sent = 1, email_sent_at = ?, updated_at = ?
+          SET email_sent = 1, email_sent_at = ?, email_status = 'accepted',
+              email_attempts = email_attempts + 1, email_last_error = NULL,
+              updated_at = ?
           WHERE shop_domain = ? AND order_id = ?`,
     args: [now, now, shopDomain, orderId],
+  });
+}
+
+/**
+ * Call when the email provider genuinely rejected the send, timed out, or
+ * was not configured — never for the "none" no-op succeeding, which isn't
+ * a send attempt at all. Does NOT touch email_sent/email_sent_at, so a
+ * grant that was already successfully emailed before a later resend
+ * attempt fails doesn't retroactively look like it was never sent.
+ */
+export async function markAccessGrantEmailFailed(
+  shopDomain: string,
+  orderId: string,
+  errorMessage: string
+): Promise<void> {
+  const db = getDbClient();
+  const now = new Date().toISOString();
+  await db.execute({
+    sql: `UPDATE access_grants
+          SET email_status = 'failed', email_attempts = email_attempts + 1,
+              email_last_error = ?, updated_at = ?
+          WHERE shop_domain = ? AND order_id = ?`,
+    // Truncated defensively — this is a provider error string, never a
+    // raw token, but it's still external input and shouldn't grow the
+    // column unbounded.
+    args: [errorMessage.slice(0, 500), now, shopDomain, orderId],
+  });
+}
+
+/**
+ * Rotates an existing grant's token (new hash persisted, the raw value
+ * never is) ahead of a resend — the only way to send a *usable* link
+ * again, since the previous raw token was never retained anywhere. Resets
+ * email_status to 'not_sent' for the new token; a stale failure reason
+ * tied to the old token is no longer meaningful. No-ops (0 rows affected)
+ * if the grant is revoked — callers must check `revoked` themselves and
+ * refuse before calling this; the WHERE clause is defense in depth, not
+ * the primary guard.
+ */
+export async function rotateAccessGrantToken(
+  shopDomain: string,
+  orderId: string,
+  newTokenHash: string
+): Promise<void> {
+  const db = getDbClient();
+  const now = new Date().toISOString();
+  await db.execute({
+    sql: `UPDATE access_grants
+          SET token_hash = ?, token_created_at = ?, email_status = 'not_sent',
+              email_last_error = NULL, updated_at = ?
+          WHERE shop_domain = ? AND order_id = ? AND revoked = 0`,
+    args: [newTokenHash, now, now, shopDomain, orderId],
   });
 }

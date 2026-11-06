@@ -26,7 +26,23 @@ async function main() {
 
     console.log(`Applying ${file} (${statements.length} statement(s))...`);
     for (const statement of statements) {
-      await db.execute(statement);
+      try {
+        await db.execute(statement);
+      } catch (err) {
+        // ALTER TABLE ADD COLUMN has no IF NOT EXISTS in SQLite/libSQL, so
+        // a column added by an already-applied migration makes a re-run
+        // throw here rather than no-op. Treat that specific case as
+        // already-done and keep going, so this script stays safe to
+        // re-run (its own doc comment's promise) instead of requiring the
+        // next migration to be applied by hand against production, as
+        // 0003 had to be.
+        const message = err instanceof Error ? err.message : String(err);
+        if (/duplicate column name|already exists/i.test(message)) {
+          console.log(`  (already applied, skipping) ${statement.split("\n")[0]}`);
+          continue;
+        }
+        throw err;
+      }
     }
   }
 

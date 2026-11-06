@@ -22,8 +22,18 @@ vi.mock("@/lib/admin-api", async () => {
   };
 });
 
+// The route must not depend on "none" (the test env's default
+// EMAIL_PROVIDER) ever reporting success — it no longer does, by design
+// (see tests/email-provider.test.ts) — so the real send is mocked here,
+// same as the Admin API above, defaulting to success for the existing
+// tests that only care about grant/idempotency behavior.
+vi.mock("@/lib/email", () => ({
+  sendAccessReadyEmail: vi.fn(),
+}));
+
 import { POST } from "@/app/api/webhooks/orders-paid/route";
 import { shopifyAdminApiClient } from "@/lib/admin-api";
+import { sendAccessReadyEmail } from "@/lib/email";
 import { findAccessGrantByOrder } from "@/lib/access-grants";
 
 const WEBHOOK_SECRET = "test-webhook-secret"; // matches tests/setup.ts
@@ -73,6 +83,8 @@ function eligibleOrderData(orderId: string) {
 describe("orders/paid webhook route", () => {
   beforeEach(() => {
     vi.mocked(shopifyAdminApiClient.fetchOrderEligibilityData).mockReset();
+    vi.mocked(sendAccessReadyEmail).mockReset();
+    vi.mocked(sendAccessReadyEmail).mockResolvedValue({ success: true });
   });
 
   it("rejects a request with an invalid HMAC signature and creates no grant", async () => {
@@ -215,5 +227,47 @@ describe("orders/paid webhook route", () => {
     const secondGrant = await findAccessGrantByOrder(SHOP, orderId);
 
     expect(firstGrant?.tokenHash).toEqual(secondGrant?.tokenHash);
+  });
+
+  it("REGRESSION: records a genuine email failure (not emailSent) when the provider rejects the send, so it stays eligible for retry", async () => {
+    const orderId = uniqueId();
+    vi.mocked(shopifyAdminApiClient.fetchOrderEligibilityData).mockResolvedValue(
+      eligibleOrderData(orderId)
+    );
+    vi.mocked(sendAccessReadyEmail).mockResolvedValue({
+      success: false,
+      error: "Resend API 422: invalid from address",
+    });
+
+    const res = await POST(
+      buildWebhookRequest(
+        { id: Number(orderId), email: "customer@example.com" },
+        { webhookId: `wh-${orderId}` }
+      )
+    );
+    expect(res.status).toBe(200); // webhook is still acknowledged — grant creation succeeded
+
+    const grant = await findAccessGrantByOrder(SHOP, orderId);
+    expect(grant?.emailSent).toBe(false);
+    expect(grant?.emailStatus).toBe("failed");
+    expect(grant?.emailLastError).toMatch(/invalid from address/);
+  });
+
+  it("passes a non-empty idempotency key to the email provider, derived from the grant's token", async () => {
+    const orderId = uniqueId();
+    vi.mocked(shopifyAdminApiClient.fetchOrderEligibilityData).mockResolvedValue(
+      eligibleOrderData(orderId)
+    );
+
+    await POST(
+      buildWebhookRequest(
+        { id: Number(orderId), email: "customer@example.com" },
+        { webhookId: `wh-${orderId}` }
+      )
+    );
+
+    const [, , idempotencyKey] = vi.mocked(sendAccessReadyEmail).mock.calls[0]!;
+    expect(typeof idempotencyKey).toBe("string");
+    expect(idempotencyKey!.length).toBeGreaterThan(0);
   });
 });

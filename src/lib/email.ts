@@ -34,7 +34,8 @@ export interface EmailSendResult {
 export interface EmailSender {
   sendAccessReadyEmail(
     to: string,
-    params: AccessReadyEmailParams
+    params: AccessReadyEmailParams,
+    idempotencyKey?: string
   ): Promise<EmailSendResult>;
 }
 
@@ -42,6 +43,11 @@ export interface EmailSender {
  * Dev/test provider. Does not send anything over the network — logs the
  * rendered email to the console. This is the default (EMAIL_PROVIDER=none)
  * so the service runs end-to-end locally with no email credentials.
+ *
+ * Reports success: false. It used to report true, which let the app
+ * record email_sent=1 for a customer who never actually received
+ * anything (the bug this fixed) — "none" is a no-op, not a delivery, and
+ * must never be mistaken for one by any caller.
  */
 class NoneEmailSender implements EmailSender {
   async sendAccessReadyEmail(
@@ -49,7 +55,7 @@ class NoneEmailSender implements EmailSender {
     params: AccessReadyEmailParams
   ): Promise<EmailSendResult> {
     // eslint-disable-next-line no-console
-    console.log("[email:none] Would send access-ready email", {
+    console.log("[email:none] Would send access-ready email (NOT actually sent)", {
       to,
       subject: ACCESS_READY_EMAIL_SUBJECT,
       orderName: params.orderName,
@@ -59,7 +65,86 @@ class NoneEmailSender implements EmailSender {
       // redact to keep the dev/prod code paths identical in behavior.
       accessPageUrl: redactUrlToken(params.accessPageUrl),
     });
-    return { success: true, providerMessageId: "none-provider-noop" };
+    return {
+      success: false,
+      error: "EMAIL_PROVIDER=none: no-op, no email was actually sent",
+    };
+  }
+}
+
+/**
+ * Resend adapter — a dedicated transactional email API, matching the
+ * "code supplies the exact subject/HTML/text, provider just relays it"
+ * approach the original comment above recommended instead of relying on
+ * a marketing-automation flow being configured correctly. Plain `fetch`
+ * against Resend's REST API (https://resend.com/docs/api-reference/emails/send-email) —
+ * no SDK dependency needed for one call.
+ */
+const RESEND_TIMEOUT_MS = 10_000;
+
+class ResendEmailSender implements EmailSender {
+  async sendAccessReadyEmail(
+    to: string,
+    params: AccessReadyEmailParams,
+    idempotencyKey?: string
+  ): Promise<EmailSendResult> {
+    if (!config.email.resendApiKey) {
+      return { success: false, error: "Resend not configured (RESEND_API_KEY missing)" };
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), RESEND_TIMEOUT_MS);
+    try {
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${config.email.resendApiKey}`,
+      };
+      // Lets Resend itself dedupe a retried send of the exact same
+      // token/attempt server-side, so a request that times out here
+      // (genuinely unknown whether Resend received it) can be retried
+      // without risking a second email for the same link — see the
+      // caller (src/lib/access-recovery.ts), which derives this key from
+      // the grant's current token hash.
+      if (idempotencyKey) {
+        headers["Idempotency-Key"] = idempotencyKey;
+      }
+
+      const response = await fetch("https://api.resend.com/emails", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          from: config.email.fromAddress,
+          to: [to],
+          subject: ACCESS_READY_EMAIL_SUBJECT,
+          html: renderAccessReadyEmailHtml(params),
+          text: renderAccessReadyEmailText(params),
+        }),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        const body = await response.text().catch(() => "");
+        return { success: false, error: `Resend API ${response.status}: ${body}` };
+      }
+
+      const json = (await response.json().catch(() => ({}))) as { id?: unknown };
+      return {
+        success: true,
+        providerMessageId: typeof json.id === "string" ? json.id : undefined,
+      };
+    } catch (err) {
+      const isTimeout = err instanceof Error && err.name === "AbortError";
+      return {
+        success: false,
+        error: isTimeout
+          ? "Resend request timed out (delivery outcome unknown — safe to retry, see Idempotency-Key)"
+          : err instanceof Error
+            ? err.message
+            : "Unknown Resend error",
+      };
+    } finally {
+      clearTimeout(timeout);
+    }
   }
 }
 
@@ -191,6 +276,8 @@ class OmnisendEmailSender implements EmailSender {
 
 function getEmailSender(): EmailSender {
   switch (config.email.provider) {
+    case "resend":
+      return new ResendEmailSender();
     case "klaviyo":
       return new KlaviyoEmailSender();
     case "omnisend":
@@ -211,19 +298,20 @@ function getEmailSender(): EmailSender {
       // startup/runtime error, never a silent no-op.
       throw new Error(
         `EMAIL_PROVIDER="${config.email.provider}" is not implemented. ` +
-          `Valid values: "klaviyo" | "omnisend" | "none". ("smtp" is ` +
-          `documented as a future option but has no sender implementation ` +
-          `yet — see src/lib/email.ts.)`
+          `Valid values: "resend" | "klaviyo" | "omnisend" | "none". ` +
+          `("smtp" is documented as a future option but has no sender ` +
+          `implementation yet — see src/lib/email.ts.)`
       );
   }
 }
 
 export async function sendAccessReadyEmail(
   to: string,
-  params: AccessReadyEmailParams
+  params: AccessReadyEmailParams,
+  idempotencyKey?: string
 ): Promise<EmailSendResult> {
   const sender = getEmailSender();
-  return sender.sendAccessReadyEmail(to, params);
+  return sender.sendAccessReadyEmail(to, params, idempotencyKey);
 }
 
 /** Exposed for tests that want to assert on rendering without sending. */

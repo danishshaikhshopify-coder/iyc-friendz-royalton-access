@@ -5,6 +5,8 @@ import {
   findAccessGrantByTokenHash,
   revokeAccessGrantForOrder,
   markAccessGrantEmailSent,
+  markAccessGrantEmailFailed,
+  rotateAccessGrantToken,
 } from "@/lib/access-grants";
 import { generateAccessToken, hashToken } from "@/lib/token";
 
@@ -65,10 +67,57 @@ describe("access grants data access", () => {
     const tokenHash = hashToken(generateAccessToken(), SECRET);
     await createAccessGrant({ shopDomain: SHOP, orderId, tokenHash });
 
+    expect((await findAccessGrantByOrder(SHOP, orderId))?.emailStatus).toBe("not_sent");
+
     await markAccessGrantEmailSent(SHOP, orderId);
 
     const grant = await findAccessGrantByOrder(SHOP, orderId);
     expect(grant?.emailSent).toBe(true);
     expect(grant?.emailSentAt).not.toBeNull();
+    expect(grant?.emailStatus).toBe("accepted");
+    expect(grant?.emailAttempts).toBe(1);
+  });
+
+  it("REGRESSION: marks a genuine send failure without marking emailSent, so it stays eligible for retry", async () => {
+    const orderId = uniqueOrderId();
+    const tokenHash = hashToken(generateAccessToken(), SECRET);
+    await createAccessGrant({ shopDomain: SHOP, orderId, tokenHash });
+
+    await markAccessGrantEmailFailed(SHOP, orderId, "Resend API 422: invalid from address");
+
+    const grant = await findAccessGrantByOrder(SHOP, orderId);
+    expect(grant?.emailSent).toBe(false);
+    expect(grant?.emailStatus).toBe("failed");
+    expect(grant?.emailAttempts).toBe(1);
+    expect(grant?.emailLastError).toMatch(/invalid from address/);
+  });
+
+  it("rotateAccessGrantToken replaces the token hash and resets email status for the fresh token", async () => {
+    const orderId = uniqueOrderId();
+    const originalHash = hashToken(generateAccessToken(), SECRET);
+    await createAccessGrant({ shopDomain: SHOP, orderId, tokenHash: originalHash });
+    await markAccessGrantEmailFailed(SHOP, orderId, "simulated prior failure");
+
+    const newHash = hashToken(generateAccessToken(), SECRET);
+    await rotateAccessGrantToken(SHOP, orderId, newHash);
+
+    const grant = await findAccessGrantByOrder(SHOP, orderId);
+    expect(grant?.tokenHash).toBe(newHash);
+    expect(grant?.emailStatus).toBe("not_sent");
+    expect(grant?.emailLastError).toBeNull();
+    // The OLD token hash no longer resolves to this (or any) grant.
+    expect(await findAccessGrantByTokenHash(originalHash)).toBeNull();
+  });
+
+  it("rotateAccessGrantToken does not rotate a revoked grant's token", async () => {
+    const orderId = uniqueOrderId();
+    const originalHash = hashToken(generateAccessToken(), SECRET);
+    await createAccessGrant({ shopDomain: SHOP, orderId, tokenHash: originalHash });
+    await revokeAccessGrantForOrder(SHOP, orderId);
+
+    await rotateAccessGrantToken(SHOP, orderId, hashToken(generateAccessToken(), SECRET));
+
+    const grant = await findAccessGrantByOrder(SHOP, orderId);
+    expect(grant?.tokenHash).toBe(originalHash);
   });
 });
