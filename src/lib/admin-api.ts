@@ -26,6 +26,12 @@ export interface OrderEligibilityData {
   displayFinancialStatus: string; // e.g. PAID, PARTIALLY_REFUNDED, REFUNDED, VOIDED, PENDING
   cancelledAt: string | null;
   lineItems: OrderLineItemData[];
+  // Optional (rather than required) so existing test fixtures built
+  // before this field existed still type-check without updating every
+  // one of them — but the real implementation below always sets it.
+  // Fetched fresh from Shopify so callers (src/lib/access-recovery.ts)
+  // never have to trust a caller-supplied email as the send destination.
+  email?: string | null;
 }
 
 export class AdminApiError extends Error {
@@ -40,6 +46,7 @@ const ORDER_QUERY = `
     order(id: $id) {
       id
       name
+      email
       displayFinancialStatus
       cancelledAt
       lineItems(first: 100) {
@@ -116,6 +123,7 @@ export const shopifyAdminApiClient: AdminApiClient = {
         order: {
           id: string;
           name: string;
+          email: string | null;
           displayFinancialStatus: string;
           cancelledAt: string | null;
           lineItems: {
@@ -147,6 +155,7 @@ export const shopifyAdminApiClient: AdminApiClient = {
     return {
       orderGid: order.id,
       name: order.name,
+      email: order.email,
       displayFinancialStatus: order.displayFinancialStatus,
       cancelledAt: order.cancelledAt,
       lineItems: order.lineItems.edges.map((edge) => ({

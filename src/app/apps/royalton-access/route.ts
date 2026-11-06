@@ -81,7 +81,7 @@ export async function GET(request: NextRequest) {
   // 2. Rate limit, keyed by IP + token so one leaked/guessed token can't
   //    be hammered, and so one IP can't brute-force many tokens quickly.
   const rateLimitKey = `${getClientIp(request)}|${token}`;
-  const rate = checkRateLimit(
+  const rate = await checkRateLimit(
     rateLimitKey,
     config.rateLimit.windowMs,
     config.rateLimit.maxRequests

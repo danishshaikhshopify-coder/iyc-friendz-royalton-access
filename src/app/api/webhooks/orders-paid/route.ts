@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { NextRequest } from "next/server";
 import { config } from "@/lib/config";
 import { handleShopifyOrderWebhook } from "@/lib/webhook-handler";
@@ -74,17 +73,10 @@ export async function POST(request: NextRequest) {
     }
 
     const accessPageUrl = buildAccessPageUrl(rawToken);
-    // Lets the provider dedupe a retried send of this exact token server
-    // side (see src/lib/email.ts's Resend adapter) — safe even if a
-    // previous attempt's outcome was a timeout, not a confirmed failure.
-    const idempotencyKey = createHash("sha256")
-      .update(`${ctx.shopDomain}:${orderIdKey}:${tokenHash}`)
-      .digest("hex");
-    const result = await sendAccessReadyEmail(
-      to,
-      { accessPageUrl, orderName: payload.name ?? orderIdKey },
-      idempotencyKey
-    );
+    const result = await sendAccessReadyEmail(to, {
+      accessPageUrl,
+      orderName: payload.name ?? orderIdKey,
+    });
 
     if (result.success) {
       await markAccessGrantEmailSent(ctx.shopDomain, orderIdKey);

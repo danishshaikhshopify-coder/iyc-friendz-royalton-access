@@ -2,9 +2,9 @@
  * Route-level tests for the orders/paid webhook handler
  * (src/app/api/webhooks/orders-paid/route.ts). Calls the exported POST
  * handler directly with a constructed NextRequest — no running server.
- * The Shopify Admin API client is mocked; HMAC verification, idempotency,
- * and the access-grant creation/email-send flow all run for real against
- * the local test database.
+ * The Shopify Admin API client is mocked; HMAC verification, webhook
+ * idempotency, and the access-grant creation/email-send flow all run for
+ * real against the local test database.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { createHmac } from "node:crypto";
@@ -25,8 +25,7 @@ vi.mock("@/lib/admin-api", async () => {
 // The route must not depend on "none" (the test env's default
 // EMAIL_PROVIDER) ever reporting success — it no longer does, by design
 // (see tests/email-provider.test.ts) — so the real send is mocked here,
-// same as the Admin API above, defaulting to success for the existing
-// tests that only care about grant/idempotency behavior.
+// same as the Admin API above.
 vi.mock("@/lib/email", () => ({
   sendAccessReadyEmail: vi.fn(),
 }));
@@ -236,7 +235,7 @@ describe("orders/paid webhook route", () => {
     );
     vi.mocked(sendAccessReadyEmail).mockResolvedValue({
       success: false,
-      error: "Resend API 422: invalid from address",
+      error: "Omnisend API 422: invalid event payload",
     });
 
     const res = await POST(
@@ -250,24 +249,6 @@ describe("orders/paid webhook route", () => {
     const grant = await findAccessGrantByOrder(SHOP, orderId);
     expect(grant?.emailSent).toBe(false);
     expect(grant?.emailStatus).toBe("failed");
-    expect(grant?.emailLastError).toMatch(/invalid from address/);
-  });
-
-  it("passes a non-empty idempotency key to the email provider, derived from the grant's token", async () => {
-    const orderId = uniqueId();
-    vi.mocked(shopifyAdminApiClient.fetchOrderEligibilityData).mockResolvedValue(
-      eligibleOrderData(orderId)
-    );
-
-    await POST(
-      buildWebhookRequest(
-        { id: Number(orderId), email: "customer@example.com" },
-        { webhookId: `wh-${orderId}` }
-      )
-    );
-
-    const [, , idempotencyKey] = vi.mocked(sendAccessReadyEmail).mock.calls[0]!;
-    expect(typeof idempotencyKey).toBe("string");
-    expect(idempotencyKey!.length).toBeGreaterThan(0);
+    expect(grant?.emailLastError).toMatch(/invalid event payload/);
   });
 });

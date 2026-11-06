@@ -1,30 +1,22 @@
 /**
- * Minimal in-memory rate limiter for the App Proxy access route.
+ * Shared, persistent rate limiter for the App Proxy access route, backed
+ * by Turso (this service's existing DB) instead of an in-memory Map.
  *
- * LIMITATION (documented, not hidden): this is a single-process, in-memory
- * sliding-window counter. It works correctly on a single long-running
- * server instance. It does NOT coordinate across multiple serverless
- * instances/regions (e.g. Vercel can run several concurrent instances of
- * the same route), so under that kind of deployment the effective limit
- * is "N requests per window, per instance" rather than a hard global cap.
+ * Why not in-memory: Vercel can run several concurrent instances of the
+ * same route, each with its own process memory — an in-memory counter
+ * gives each instance an independent "N requests per window" budget, so
+ * the effective limit in production is N * (number of warm instances),
+ * not a real global N. A fixed-window counter in Turso is shared by every
+ * instance.
  *
- * For this use case (slowing down token-guessing against the access
- * route, not protecting a high-traffic endpoint) that's an acceptable
- * first line of defense, but it is not a substitute for the token's own
- * entropy, and should be upgraded to a shared store (e.g. a Turso table,
- * or Redis) before relying on it as a hard limit in a multi-instance
- * production deployment. That upgrade is noted as a remaining item in the
- * Task 17 report rather than implemented here, to keep this service's
- * dependency footprint minimal until it's known whether it matters for
- * the actual deployment target.
+ * Concurrency: the check-and-increment happens in a single atomic
+ * INSERT ... ON CONFLICT DO UPDATE ... RETURNING statement, so two
+ * requests racing for the same key can't both read a stale pre-increment
+ * count — each gets its own consistent post-increment value back from
+ * the database.
  */
 
-interface Bucket {
-  count: number;
-  windowStart: number;
-}
-
-const buckets = new Map<string, Bucket>();
+import { getDbClient } from "@/lib/db";
 
 export interface RateLimitResult {
   allowed: boolean;
@@ -32,29 +24,35 @@ export interface RateLimitResult {
   retryAfterMs?: number;
 }
 
-export function checkRateLimit(
+export async function checkRateLimit(
   key: string,
   windowMs: number,
   maxRequests: number,
   now: number = Date.now()
-): RateLimitResult {
-  const existing = buckets.get(key);
+): Promise<RateLimitResult> {
+  const db = getDbClient();
+  const result = await db.execute({
+    sql: `INSERT INTO rate_limit_buckets (key, count, window_start)
+          VALUES (?, 1, ?)
+          ON CONFLICT (key) DO UPDATE SET
+            count = CASE WHEN ? - window_start >= ? THEN 1 ELSE count + 1 END,
+            window_start = CASE WHEN ? - window_start >= ? THEN ? ELSE window_start END
+          RETURNING count, window_start`,
+    args: [key, now, now, windowMs, now, windowMs, now],
+  });
 
-  if (!existing || now - existing.windowStart >= windowMs) {
-    buckets.set(key, { count: 1, windowStart: now });
-    return { allowed: true, remaining: maxRequests - 1 };
+  const row = result.rows[0];
+  const count = Number(row?.count);
+  const windowStart = Number(row?.window_start);
+
+  if (count > maxRequests) {
+    return { allowed: false, remaining: 0, retryAfterMs: windowStart + windowMs - now };
   }
-
-  if (existing.count >= maxRequests) {
-    const retryAfterMs = existing.windowStart + windowMs - now;
-    return { allowed: false, remaining: 0, retryAfterMs };
-  }
-
-  existing.count += 1;
-  return { allowed: true, remaining: maxRequests - existing.count };
+  return { allowed: true, remaining: maxRequests - count };
 }
 
 /** Test-only helper to reset state between test cases. */
-export function _resetRateLimitStateForTests(): void {
-  buckets.clear();
+export async function _resetRateLimitStateForTests(): Promise<void> {
+  const db = getDbClient();
+  await db.execute("DELETE FROM rate_limit_buckets");
 }

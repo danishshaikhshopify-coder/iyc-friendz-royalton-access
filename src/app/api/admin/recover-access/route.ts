@@ -10,7 +10,12 @@
  * Invoke with (never from a client — server-to-server only):
  *   POST /api/admin/recover-access
  *   Header: x-admin-secret: <ADMIN_RECOVERY_SECRET>
- *   Body:   {"orderId":"...","customerEmail":"...","orderName":"#1234"}
+ *   Body:   {"orderId":"..."}
+ *
+ * Deliberately takes no email/name in the body — recoverAccessForOrder
+ * always sends to the order's own email, fetched fresh from Shopify, so
+ * this endpoint cannot be used to redirect an access link to an
+ * arbitrary address.
  */
 import { NextRequest, NextResponse } from "next/server";
 import { timingSafeEqual } from "node:crypto";
@@ -32,8 +37,6 @@ function isAuthorized(request: NextRequest): boolean {
 
 interface RecoverAccessBody {
   orderId?: string;
-  customerEmail?: string;
-  orderName?: string;
 }
 
 export async function POST(request: NextRequest) {
@@ -48,19 +51,11 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "invalid_json" }, { status: 400 });
   }
 
-  if (!body.orderId || !body.customerEmail) {
-    return NextResponse.json(
-      { error: "missing_order_id_or_customer_email" },
-      { status: 400 }
-    );
+  if (!body.orderId) {
+    return NextResponse.json({ error: "missing_order_id" }, { status: 400 });
   }
 
-  const result = await recoverAccessForOrder(
-    config.shopify.shopDomain,
-    body.orderId,
-    body.customerEmail,
-    body.orderName
-  );
+  const result = await recoverAccessForOrder(config.shopify.shopDomain, body.orderId);
 
   return NextResponse.json(result, { status: result.ok ? 200 : 502 });
 }

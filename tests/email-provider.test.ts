@@ -44,9 +44,9 @@ describe("getEmailSender provider selection", () => {
     expect(result.success).toBe(false);
   });
 
-  it("'resend' is implemented (does not throw) but fails gracefully with a clear error when RESEND_API_KEY is missing", async () => {
-    const result = await sendWithProvider("resend");
+  it("'omnisend' is implemented (does not throw) but fails gracefully with a clear error when OMNISEND_API_KEY is missing", async () => {
+    const result = await sendWithProvider("omnisend");
     expect(result.success).toBe(false);
-    expect(result.error).toMatch(/RESEND_API_KEY/);
+    expect(result.error).toMatch(/OMNISEND_API_KEY/);
   });
 });

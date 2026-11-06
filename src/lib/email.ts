@@ -2,15 +2,13 @@
  * Email delivery abstraction.
  *
  * Why an abstraction at all: this service must send one transactional,
- * per-customer email containing a unique access link. Dani's existing
- * marketing tools for this client (Klaviyo / Omnisend / Postscript, per
- * prior project notes) are built around marketing flows/automations
- * triggered by events, not around "send this exact, code-controlled HTML
- * to this one address right now" — which is what a security-sensitive,
- * per-customer link needs. Without live credentials to test against, this
- * service does NOT assume Klaviyo/Omnisend can reliably do this; see the
- * KlaviyoEmailSender/OmnisendEmailSender comments below and the Task 17
- * report's Outstanding Requirements section.
+ * per-customer email containing a unique access link. Omnisend (the
+ * chosen production provider) is an event/automation-driven marketing
+ * tool, not a direct transactional-send API — this code fires a
+ * dedicated Custom Event and relies on an Automation already built in
+ * the Omnisend dashboard to actually deliver the email. That dashboard
+ * setup can't be done from here; see OmnisendEmailSender's comment below
+ * and the "remaining setup" item in the Task 17 report.
  *
  * EmailSender is the interface every provider implements. The webhook
  * handler calls `getEmailSender().send(...)`, never a provider directly,
@@ -34,8 +32,7 @@ export interface EmailSendResult {
 export interface EmailSender {
   sendAccessReadyEmail(
     to: string,
-    params: AccessReadyEmailParams,
-    idempotencyKey?: string
+    params: AccessReadyEmailParams
   ): Promise<EmailSendResult>;
 }
 
@@ -72,81 +69,8 @@ class NoneEmailSender implements EmailSender {
   }
 }
 
-/**
- * Resend adapter — a dedicated transactional email API, matching the
- * "code supplies the exact subject/HTML/text, provider just relays it"
- * approach the original comment above recommended instead of relying on
- * a marketing-automation flow being configured correctly. Plain `fetch`
- * against Resend's REST API (https://resend.com/docs/api-reference/emails/send-email) —
- * no SDK dependency needed for one call.
- */
-const RESEND_TIMEOUT_MS = 10_000;
-
-class ResendEmailSender implements EmailSender {
-  async sendAccessReadyEmail(
-    to: string,
-    params: AccessReadyEmailParams,
-    idempotencyKey?: string
-  ): Promise<EmailSendResult> {
-    if (!config.email.resendApiKey) {
-      return { success: false, error: "Resend not configured (RESEND_API_KEY missing)" };
-    }
-
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), RESEND_TIMEOUT_MS);
-    try {
-      const headers: Record<string, string> = {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${config.email.resendApiKey}`,
-      };
-      // Lets Resend itself dedupe a retried send of the exact same
-      // token/attempt server-side, so a request that times out here
-      // (genuinely unknown whether Resend received it) can be retried
-      // without risking a second email for the same link — see the
-      // caller (src/lib/access-recovery.ts), which derives this key from
-      // the grant's current token hash.
-      if (idempotencyKey) {
-        headers["Idempotency-Key"] = idempotencyKey;
-      }
-
-      const response = await fetch("https://api.resend.com/emails", {
-        method: "POST",
-        headers,
-        body: JSON.stringify({
-          from: config.email.fromAddress,
-          to: [to],
-          subject: ACCESS_READY_EMAIL_SUBJECT,
-          html: renderAccessReadyEmailHtml(params),
-          text: renderAccessReadyEmailText(params),
-        }),
-        signal: controller.signal,
-      });
-
-      if (!response.ok) {
-        const body = await response.text().catch(() => "");
-        return { success: false, error: `Resend API ${response.status}: ${body}` };
-      }
-
-      const json = (await response.json().catch(() => ({}))) as { id?: unknown };
-      return {
-        success: true,
-        providerMessageId: typeof json.id === "string" ? json.id : undefined,
-      };
-    } catch (err) {
-      const isTimeout = err instanceof Error && err.name === "AbortError";
-      return {
-        success: false,
-        error: isTimeout
-          ? "Resend request timed out (delivery outcome unknown — safe to retry, see Idempotency-Key)"
-          : err instanceof Error
-            ? err.message
-            : "Unknown Resend error",
-      };
-    } finally {
-      clearTimeout(timeout);
-    }
-  }
-}
+/** Network timeout shared by the HTTP-based provider adapters below. */
+const PROVIDER_TIMEOUT_MS = 10_000;
 
 /**
  * Klaviyo adapter — UNVERIFIED, best-effort only.
@@ -220,8 +144,55 @@ class KlaviyoEmailSender implements EmailSender {
 }
 
 /**
- * Omnisend adapter — same caveat as Klaviyo above: fires a custom event,
- * relies on an Omnisend automation already built to match it. UNVERIFIED.
+ * Current API version pinned in the Omnisend-Version header, per
+ * https://api-docs.omnisend.com/reference/post_events (checked against
+ * the live docs, not the deprecated v3/v5 examples still floating
+ * around). Bump deliberately, not as a side effect of an unrelated
+ * change — a version bump can change response shape/behavior.
+ */
+const OMNISEND_API_VERSION = "2026-03-15";
+
+/** Shape of Omnisend's documented 400 Validation failed response body. */
+interface OmnisendValidationProblem {
+  title?: string;
+  detail?: string;
+  errors?: { field?: string; message?: string }[];
+}
+
+function describeOmnisendError(status: number, bodyText: string): string {
+  try {
+    const problem = JSON.parse(bodyText) as OmnisendValidationProblem;
+    const firstFieldError = problem.errors?.[0];
+    const detail =
+      (firstFieldError && `${firstFieldError.field}: ${firstFieldError.message}`) ||
+      problem.detail ||
+      problem.title;
+    return detail ? `Omnisend API ${status}: ${detail}` : `Omnisend API ${status}`;
+  } catch {
+    return `Omnisend API ${status}: ${bodyText}`;
+  }
+}
+
+/**
+ * Omnisend adapter — the chosen production provider. Fires a dedicated
+ * Custom Event (`royalton_access_ready`, distinct from any marketing
+ * event name) carrying the verified recipient email and the access URL,
+ * via Omnisend's current Events API: POST
+ * https://api.omnisend.com/api/events (NOT the deprecated /v3/events or
+ * /v5/events). An Omnisend Automation keyed to this exact event name
+ * must exist in the account to actually deliver an email — that's a
+ * dashboard-side task, not something this code can create, and is
+ * called out as a remaining setup item. This event name is deliberately
+ * separate from the store's existing Order Confirmation / post-purchase
+ * automations, which this code never touches.
+ *
+ * The API's only documented success response is 202 Accepted, meaning
+ * the event was accepted for processing — it is NOT proof the
+ * automation ran or that an inbox received anything. We only ever
+ * report success for exactly a 202; any other status (including any
+ * other 2xx, since none is documented) is treated as a failure so a
+ * silent provider-side problem doesn't get recorded as a delivered
+ * email.
  */
 class OmnisendEmailSender implements EmailSender {
   async sendAccessReadyEmail(
@@ -232,52 +203,52 @@ class OmnisendEmailSender implements EmailSender {
       return { success: false, error: "Omnisend not configured (OMNISEND_API_KEY missing)" };
     }
 
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), PROVIDER_TIMEOUT_MS);
     try {
-      const response = await fetch("https://api.omnisend.com/v3/events", {
+      const response = await fetch("https://api.omnisend.com/api/events", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "X-API-KEY": config.email.omnisendApiKey,
+          Authorization: `Omnisend-API-Key ${config.email.omnisendApiKey}`,
+          "Omnisend-Version": OMNISEND_API_VERSION,
         },
         body: JSON.stringify({
-          eventName: "royalton booking link ready",
-          email: to,
-          fields: {
+          eventName: "royalton_access_ready",
+          origin: "api",
+          contact: { email: to },
+          properties: {
             access_page_url: params.accessPageUrl,
             order_name: params.orderName,
           },
         }),
+        signal: controller.signal,
       });
 
-      if (!response.ok) {
+      if (response.status !== 202) {
         const body = await response.text().catch(() => "");
-        return { success: false, error: `Omnisend API ${response.status}: ${body}` };
+        return { success: false, error: describeOmnisendError(response.status, body) };
       }
 
       return { success: true };
     } catch (err) {
+      const isTimeout = err instanceof Error && err.name === "AbortError";
       return {
         success: false,
-        error: err instanceof Error ? err.message : "Unknown Omnisend error",
+        error: isTimeout
+          ? "Omnisend request timed out (delivery outcome unknown)"
+          : err instanceof Error
+            ? err.message
+            : "Unknown Omnisend error",
       };
+    } finally {
+      clearTimeout(timeout);
     }
   }
 }
 
-/**
- * Recommended alternative: a dedicated transactional email API (Postmark,
- * SendGrid, Resend, Amazon SES, etc.) where this code supplies the exact
- * subject/HTML/text and the provider just relays it — no dependency on a
- * marketing flow being configured correctly. Implemented here as a single
- * generic SMTP-less HTTP sender is deliberately NOT included because no
- * such provider/credentials were specified; this is the recommendation
- * written up in the Task 17 report rather than guessed at in code.
- */
-
 function getEmailSender(): EmailSender {
   switch (config.email.provider) {
-    case "resend":
-      return new ResendEmailSender();
     case "klaviyo":
       return new KlaviyoEmailSender();
     case "omnisend":
@@ -298,7 +269,7 @@ function getEmailSender(): EmailSender {
       // startup/runtime error, never a silent no-op.
       throw new Error(
         `EMAIL_PROVIDER="${config.email.provider}" is not implemented. ` +
-          `Valid values: "resend" | "klaviyo" | "omnisend" | "none". ` +
+          `Valid values: "omnisend" | "klaviyo" | "none". ` +
           `("smtp" is documented as a future option but has no sender ` +
           `implementation yet — see src/lib/email.ts.)`
       );
@@ -307,11 +278,10 @@ function getEmailSender(): EmailSender {
 
 export async function sendAccessReadyEmail(
   to: string,
-  params: AccessReadyEmailParams,
-  idempotencyKey?: string
+  params: AccessReadyEmailParams
 ): Promise<EmailSendResult> {
   const sender = getEmailSender();
-  return sender.sendAccessReadyEmail(to, params, idempotencyKey);
+  return sender.sendAccessReadyEmail(to, params);
 }
 
 /** Exposed for tests that want to assert on rendering without sending. */

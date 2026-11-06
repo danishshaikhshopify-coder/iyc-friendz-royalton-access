@@ -84,12 +84,11 @@ export const config = {
 
   email: {
     // Which provider to use for sending the access-page email.
-    // Implemented: "resend" | "klaviyo" | "omnisend" | "none" (logs only,
-    // for local dev). "smtp" is a documented future option, not yet
-    // implemented — see src/lib/email.ts, which throws rather than
+    // Implemented: "omnisend" (production) | "klaviyo" | "none" (logs
+    // only, for local dev). "smtp" is a documented future option, not
+    // yet implemented — see src/lib/email.ts, which throws rather than
     // silently falling back to "none" for any other value.
     provider: optional("EMAIL_PROVIDER", "none"),
-    resendApiKey: process.env.RESEND_API_KEY || undefined,
     klaviyoApiKey: process.env.KLAVIYO_PRIVATE_API_KEY || undefined,
     klaviyoListOrFlowId: process.env.KLAVIYO_TRANSACTIONAL_FLOW_ID || undefined,
     omnisendApiKey: process.env.OMNISEND_API_KEY || undefined,
