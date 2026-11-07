@@ -63,10 +63,25 @@ export async function POST(request: NextRequest) {
       tokenHash,
     });
 
-    const to = payload.email ?? payload.contact_email;
+    // Source the destination from the live Shopify order data just
+    // fetched for eligibility, not the webhook payload's own email/
+    // contact_email — same "trust Shopify's order record, not a
+    // caller-controllable value" rule enforced in access-recovery.ts.
+    // If Shopify itself has no email on the order, this is a genuine,
+    // visible failure (recorded on the grant) rather than a silent
+    // return: the grant already exists, so a later retry would never
+    // see this order's email webhook again, and leaving emailStatus at
+    // its default 'not_sent' with no error would be indistinguishable
+    // from "about to send" and nothing would ever flag it for recovery.
+    const to = orderData.email;
     if (!to) {
+      await markAccessGrantEmailFailed(
+        ctx.shopDomain,
+        orderIdKey,
+        "no email on Shopify order"
+      );
       // eslint-disable-next-line no-console
-      console.warn("[orders/paid] eligible order has no email on the webhook payload", {
+      console.warn("[orders/paid] eligible order has no email on the Shopify order record", {
         orderId: orderIdKey,
       });
       return;

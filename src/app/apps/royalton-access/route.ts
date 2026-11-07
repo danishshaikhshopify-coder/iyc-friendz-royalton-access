@@ -80,25 +80,44 @@ export async function GET(request: NextRequest) {
 
   // 2. Rate limit, keyed by IP + token so one leaked/guessed token can't
   //    be hammered, and so one IP can't brute-force many tokens quickly.
+  //
+  //    Fails OPEN on its own error (logged, not thrown further): this is
+  //    an abuse-mitigation check, not the access-control decision — that
+  //    is step 3 below, which independently fails CLOSED on any error.
+  //    An outage of the rate-limit store itself (e.g. a missing table)
+  //    must not turn into a total outage of a real, paying customer's
+  //    booking-access page when the actual eligibility check is unaffected.
   const rateLimitKey = `${getClientIp(request)}|${token}`;
-  const rate = await checkRateLimit(
-    rateLimitKey,
-    config.rateLimit.windowMs,
-    config.rateLimit.maxRequests
-  );
-  if (!rate.allowed) {
-    return htmlResponse(renderAccessPageHtml({ kind: "rate_limited" }), 429);
+  try {
+    const rate = await checkRateLimit(
+      rateLimitKey,
+      config.rateLimit.windowMs,
+      config.rateLimit.maxRequests
+    );
+    if (!rate.allowed) {
+      return htmlResponse(renderAccessPageHtml({ kind: "rate_limited" }), 429);
+    }
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error("[royalton-access] rate limit check failed, allowing through", {
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
 
-  // 3. Token lookup + LIVE eligibility check.
+  // 3. Token lookup + LIVE eligibility check. Both are the actual
+  //    access-control decision, so — unlike step 2 — any failure here
+  //    (including a grant-lookup DB error) fails CLOSED via the single
+  //    try/catch below, rather than risking an unhandled exception that
+  //    would bypass our own branded "something went wrong" page.
   const tokenHash = hashToken(token, config.tokens.signingSecret);
-  const grant = await findAccessGrantByTokenHash(tokenHash);
-
-  if (!grant || grant.revoked) {
-    return htmlResponse(renderAccessPageHtml({ kind: "ineligible" }), 403);
-  }
 
   try {
+    const grant = await findAccessGrantByTokenHash(tokenHash);
+
+    if (!grant || grant.revoked) {
+      return htmlResponse(renderAccessPageHtml({ kind: "ineligible" }), 403);
+    }
+
     const orderGid = orderGidFromNumericId(grant.orderId);
     const orderData = await shopifyAdminApiClient.fetchOrderEligibilityData(orderGid);
     const verdict = checkOrderEligibility(orderData, {
@@ -121,11 +140,11 @@ export async function GET(request: NextRequest) {
 
     return htmlResponse(renderAccessPageHtml({ kind: "eligible", bookingUrl }), 200);
   } catch (err) {
-    // Fail CLOSED: any Admin API failure means we could not verify
-    // eligibility, so we do not reveal anything.
+    // Fail CLOSED: a grant-lookup DB error or an Admin API failure both
+    // mean we could not verify eligibility, so we do not reveal anything.
     const message = err instanceof AdminApiError ? err.message : String(err);
     // eslint-disable-next-line no-console
-    console.error("[royalton-access] eligibility check failed", { error: message });
+    console.error("[royalton-access] access check failed", { error: message });
     return htmlResponse(renderAccessPageHtml({ kind: "error" }), 502);
   }
 }

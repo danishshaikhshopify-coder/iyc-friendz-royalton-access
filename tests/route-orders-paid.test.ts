@@ -69,13 +69,15 @@ function uniqueId(): string {
   return String(Date.now() * 1000 + idCounter);
 }
 
-function eligibleOrderData(orderId: string) {
+function eligibleOrderData(orderId: string, overrides: Partial<Record<string, unknown>> = {}) {
   return {
     orderGid: `gid://shopify/Order/${orderId}`,
     name: `#${orderId.slice(-4)}`,
+    email: "customer@example.com",
     displayFinancialStatus: "PAID",
     cancelledAt: null,
     lineItems: [{ productHandle: "iyc-friendz-weekend-pass", quantity: 1 }],
+    ...overrides,
   };
 }
 
@@ -250,5 +252,44 @@ describe("orders/paid webhook route", () => {
     expect(grant?.emailSent).toBe(false);
     expect(grant?.emailStatus).toBe("failed");
     expect(grant?.emailLastError).toMatch(/invalid event payload/);
+  });
+
+  it("REGRESSION: an eligible order with no email on the Shopify order record is recorded as a visible failure, not silently left unsent", async () => {
+    const orderId = uniqueId();
+    vi.mocked(shopifyAdminApiClient.fetchOrderEligibilityData).mockResolvedValue(
+      eligibleOrderData(orderId, { email: null })
+    );
+
+    const res = await POST(
+      buildWebhookRequest(
+        { id: Number(orderId), email: "customer@example.com" },
+        { webhookId: `wh-${orderId}` }
+      )
+    );
+    expect(res.status).toBe(200); // webhook is still acknowledged — grant creation succeeded
+    expect(sendAccessReadyEmail).not.toHaveBeenCalled();
+
+    const grant = await findAccessGrantByOrder(SHOP, orderId);
+    expect(grant).not.toBeNull();
+    expect(grant?.emailSent).toBe(false);
+    expect(grant?.emailStatus).toBe("failed");
+    expect(grant?.emailLastError).toMatch(/no email on shopify order/i);
+  });
+
+  it("sends to the live Shopify order's own email (fetched for the eligibility check), not whatever the webhook payload's own email/contact_email field says", async () => {
+    const orderId = uniqueId();
+    vi.mocked(shopifyAdminApiClient.fetchOrderEligibilityData).mockResolvedValue(
+      eligibleOrderData(orderId, { email: "current-shopify-order-email@example.com" })
+    );
+
+    await POST(
+      buildWebhookRequest(
+        { id: Number(orderId), email: "stale-webhook-payload-email@example.com" },
+        { webhookId: `wh-${orderId}` }
+      )
+    );
+
+    const [to] = vi.mocked(sendAccessReadyEmail).mock.calls[0]!;
+    expect(to).toBe("current-shopify-order-email@example.com");
   });
 });

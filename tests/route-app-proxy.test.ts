@@ -23,11 +23,33 @@ vi.mock("@/lib/admin-api", async () => {
   };
 });
 
+// Both wrapped functions default to their REAL implementation (the real
+// DB-backed rate limiter / grant lookup) for every test — only the two
+// DB-failure tests below override them, via mockRejectedValueOnce, which
+// reverts to the wrapped default on the very next call automatically.
+vi.mock("@/lib/rate-limit", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/rate-limit")>(
+    "@/lib/rate-limit"
+  );
+  return { ...actual, checkRateLimit: vi.fn(actual.checkRateLimit) };
+});
+
+vi.mock("@/lib/access-grants", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/access-grants")>(
+    "@/lib/access-grants"
+  );
+  return { ...actual, findAccessGrantByTokenHash: vi.fn(actual.findAccessGrantByTokenHash) };
+});
+
 import { GET } from "@/app/apps/royalton-access/route";
 import { shopifyAdminApiClient, AdminApiError } from "@/lib/admin-api";
-import { createAccessGrant, findAccessGrantByOrder } from "@/lib/access-grants";
+import {
+  createAccessGrant,
+  findAccessGrantByOrder,
+  findAccessGrantByTokenHash,
+} from "@/lib/access-grants";
 import { generateAccessToken, hashToken } from "@/lib/token";
-import { _resetRateLimitStateForTests } from "@/lib/rate-limit";
+import { checkRateLimit, _resetRateLimitStateForTests } from "@/lib/rate-limit";
 
 const PROXY_SECRET = "test-app-proxy-secret"; // matches tests/setup.ts
 const SHOP = "test-shop.myshopify.com"; // matches tests/setup.ts SHOPIFY_SHOP_DOMAIN
@@ -196,5 +218,38 @@ describe("App Proxy access route — GET /apps/royalton-access", () => {
       if (lastStatus === 429) break;
     }
     expect(lastStatus).toBe(429);
+  });
+
+  it("REGRESSION: fails OPEN (does not 500) when the rate-limit store itself errors, e.g. a missing table", async () => {
+    const orderId = uniqueOrderId();
+    const rawToken = await createGrantWithToken(orderId);
+    vi.mocked(shopifyAdminApiClient.fetchOrderEligibilityData).mockResolvedValue({
+      orderGid: `gid://shopify/Order/${orderId}`,
+      name: "#9004",
+      displayFinancialStatus: "PAID",
+      cancelledAt: null,
+      lineItems: [{ productHandle: "iyc-friendz-weekend-pass", quantity: 1 }],
+    });
+    vi.mocked(checkRateLimit).mockRejectedValueOnce(new Error("no such table: rate_limit_buckets"));
+
+    const req = buildProxyRequest({ shop: SHOP, token: rawToken });
+    const res = await GET(req);
+    // The real access-control decision (step 3) still runs and passes —
+    // a rate-limit-store outage must not become a customer-facing outage.
+    expect(res.status).toBe(200);
+  });
+
+  it("REGRESSION: fails CLOSED (502, branded error page, not an unhandled 500) when the grant lookup itself errors", async () => {
+    const orderId = uniqueOrderId();
+    const rawToken = await createGrantWithToken(orderId);
+    vi.mocked(findAccessGrantByTokenHash).mockRejectedValueOnce(
+      new Error("simulated Turso connection error")
+    );
+
+    const req = buildProxyRequest({ shop: SHOP, token: rawToken });
+    const res = await GET(req);
+    expect(res.status).toBe(502);
+    const body = await res.text();
+    expect(body).toContain("SOMETHING WENT WRONG");
   });
 });
